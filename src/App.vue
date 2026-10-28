@@ -45,7 +45,7 @@ const isHudVisible = ref<boolean>(true);
 const isFloatingOpen = ref<boolean>(true);
 const isMobile = ref<boolean>(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
 const isLeftCollapsed = ref<boolean>(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
-const isRightCollapsed = ref<boolean>(true);
+const isRightCollapsed = ref<boolean>(typeof window !== 'undefined' ? window.innerWidth < 1100 : false);
 const isMuted = ref<boolean>(audioSynth.isMuted);
 
 function toggleFloating() {

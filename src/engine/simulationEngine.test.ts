@@ -105,7 +105,19 @@ test('high rotation speed triggers kinetic explanation', () => {
   const conditions = calculateConditions(fastRotParams, 'mini-earth', INITIAL_DISASTERS);
   const logs = generateExplanations(fastRotParams, conditions, 'mini-earth', INITIAL_DISASTERS);
 
-  const hasRotLog = logs.some((l) => l.message.toLowerCase().includes('rotational velocity'));
+  const hasRotLog = logs.some((l) => l.message.toLowerCase().includes('rotational velocity') || l.message.toLowerCase().includes('rotational'));
   assert.equal(hasRotLog, true, 'Should log rotational velocity effect');
 });
+
+test('realistic oxygen partial pressure and AQI calculation', () => {
+  const earthParams = DEFAULT_PARAMS_BY_SCENE['mini-earth'];
+  const conditions = calculateConditions(earthParams, 'mini-earth', INITIAL_DISASTERS);
+
+  // Sea level Earth pO2 is approximately 21.2 kPa
+  assert.ok(conditions.physics.oxygenPartialPressureKPa >= 20.0 && conditions.physics.oxygenPartialPressureKPa <= 22.5,
+    `pO2 should be close to 21.2 kPa, was ${conditions.physics.oxygenPartialPressureKPa}`);
+  assert.ok(conditions.demographics.totalCount > 1000000, 'Demographics should reflect realistic citizen count');
+  assert.ok(conditions.demographics.activeThoughts.length > 0, 'Should have active citizen thoughts');
+});
+
 

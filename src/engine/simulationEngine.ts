@@ -6,7 +6,17 @@ import {
   SimulationLog,
   Achievement,
   PresetScenario,
+  CitizenDemographics,
+  AtmospherePhysics,
 } from '../types/simulation';
+
+export const BASE_POPULATION_BY_SCENE: Record<WorldSceneId, number> = {
+  'mini-earth': 8150000000, // 8.15 Billion
+  'future-city': 3850000,   // 3.85 Million
+  'forest-valley': 14200,   // 14.2 Thousand
+  'ocean-world': 8600,      // 8.6 Thousand
+  'mars-colony': 1480,      // 1.48 Thousand
+};
 
 export const DEFAULT_PARAMS_BY_SCENE: Record<WorldSceneId, SimulationParameters> = {
   'mini-earth': {
@@ -245,8 +255,7 @@ export const INITIAL_ACHIEVEMENTS: Achievement[] = [
 ];
 
 /**
- * Transparent calculation of condition scores based on parameters, scene, and active events.
- * Returns normalized 0 to 100 values.
+ * Realistic calculation of atmospheric physics & citizen demographic responses.
  */
 export function calculateConditions(
   params: SimulationParameters,
@@ -254,34 +263,67 @@ export function calculateConditions(
   events: DisasterEvents
 ): ConditionScores {
   const clamp = (val: number, min = 0, max = 100) => Math.max(min, Math.min(max, Math.round(val)));
-
   const isMars = sceneId === 'mars-colony';
 
-  // 1. Atmosphere: Depends heavily on oxygen, pollution, atmosphereDensity, and events
+  // 1. Realistic Atmospheric Physics
+  const densityMultiplier = (params.atmosphereDensity ?? 100) / 100;
+  // Standard sea-level pressure is 101.3 kPa, O2 fraction is oxygen/100
+  const oxygenPartialPressureKPa = parseFloat(
+    ((params.oxygen / 100) * 101.3 * densityMultiplier).toFixed(1)
+  );
+
+  // AQI calculation
+  let rawAqi = params.airPollution * 4.4;
+  if (params.energySource === 'fossil') rawAqi += 35;
+  if (params.energySource === 'renewable') rawAqi = Math.max(8, rawAqi - 20);
+  if (events.drought && params.rainfall < 20) rawAqi += 40; // dust suspension
+  const aqi = Math.min(500, Math.max(5, Math.round(rawAqi)));
+
+  let aqiCategory: AtmospherePhysics['aqiCategory'] = 'Good';
+  if (aqi > 300) aqiCategory = 'Hazardous';
+  else if (aqi > 200) aqiCategory = 'Very Unhealthy';
+  else if (aqi > 100) aqiCategory = 'Unhealthy';
+  else if (aqi > 50) aqiCategory = 'Moderate';
+
+  // Surface wetness (0 to 1) for reflections and puddles
+  let surfaceWetness = Math.min(1.0, params.rainfall / 100);
+  if (events.heavyRain) surfaceWetness = 1.0;
+  if (events.drought) surfaceWetness = Math.max(0, surfaceWetness - 0.7);
+
+  const fogDensityPercent = clamp(
+    (params.airPollution * 0.5) + (params.rainfall * 0.3) + (densityMultiplier * 20)
+  );
+
+  const physics: AtmospherePhysics = {
+    oxygenPartialPressureKPa,
+    airQualityIndex: aqi,
+    aqiCategory,
+    fogDensityPercent,
+    surfaceWetness,
+    lightningActive: events.heavyRain || (params.rainfall > 80 && params.temperature > 18),
+  };
+
+  // 2. Scores: Atmosphere Purity
   let atmosphereScore = 0;
-  const density = params.atmosphereDensity ?? 100;
   if (isMars) {
-    // Mars starts with low native atmosphere; terraforming brings density and oxygen up
-    const marsDensityBenefit = (density / 100) * 25;
-    atmosphereScore = clamp((params.oxygen / 21) * 50 + marsDensityBenefit + (100 - params.airPollution) * 0.35);
+    const marsTerraformBenefit = (densityMultiplier * 30) + (params.oxygen / 21) * 45;
+    atmosphereScore = clamp(marsTerraformBenefit + (100 - params.airPollution) * 0.25);
     if (events.solarFlare) atmosphereScore -= 15;
   } else {
-    // Earth-like worlds: optimal oxygen ~21%, optimal density ~100%
-    const oxygenDeviation = Math.abs(params.oxygen - 21);
-    const oxygenHealth = Math.max(0, 100 - oxygenDeviation * 4.5);
-    const densityPenalty = Math.abs(density - 100) * 0.22;
-    const pollutionPenalty = params.airPollution * 0.65;
-    atmosphereScore = clamp(oxygenHealth - pollutionPenalty - densityPenalty);
+    // Normal human-breathable range: pO2 ~ 19 to 23 kPa (Earth sea level ~21.2 kPa)
+    const pO2Deviation = Math.abs(oxygenPartialPressureKPa - 21.2);
+    const pO2Score = Math.max(0, 100 - pO2Deviation * 5.5);
+    const aqiPenalty = (aqi / 500) * 65;
+    atmosphereScore = clamp(pO2Score - aqiPenalty);
     if (events.solarFlare) atmosphereScore -= 10;
     if (events.meteorShower) atmosphereScore -= 8;
   }
 
-  // 2. Water Availability: Depends on rainfall, temperature, sea level, drought
+  // 3. Water Availability
   let waterScore = 0;
   if (isMars) {
-    waterScore = clamp((params.rainfall * 3) + ((params.temperature + 50) * 0.4));
+    waterScore = clamp((params.rainfall * 2.8) + ((params.temperature + 50) * 0.4));
   } else {
-    // Normal water score: optimal rainfall is 50-70%
     const rainOptimal = 100 - Math.abs(params.rainfall - 60) * 1.2;
     const tempEvapPenalty = params.temperature > 30 ? (params.temperature - 30) * 1.8 : 0;
     waterScore = clamp(rainOptimal - tempEvapPenalty);
@@ -290,10 +332,9 @@ export function calculateConditions(
     if (events.heavyRain) waterScore = clamp(waterScore + 15, 0, 100);
   }
 
-  // 3. Ecosystem Health: Dependent on atmosphere, water, temperature, sea level
+  // 4. Ecosystem Health
   let ecosystemScore = 0;
   if (isMars) {
-    // Mars biodome ecosystem health relies on colony systems & water
     ecosystemScore = clamp(atmosphereScore * 0.4 + waterScore * 0.4 + (params.energySource === 'renewable' ? 20 : 5));
   } else {
     const idealTemp = 16;
@@ -305,45 +346,113 @@ export function calculateConditions(
     if (events.heatWave) ecosystemScore -= 15;
   }
 
-  // 4. Population Wellbeing: Dependent on oxygen, atmosphere, gravity comfort, pollution, ecosystem
-  let wellbeingScore = 0;
+  // 5. Citizen Demographics & Physiological Wellbeing
   const gravityIdeal = isMars ? 3.7 : 9.8;
   const gravityStress = Math.abs(params.gravity - gravityIdeal) * 4.5;
 
+  // Oxygen sufficiency: hypoxia when pO2 < 16 kPa
   let oxygenSufficiency = 100;
-  if (params.oxygen < 16) {
-    oxygenSufficiency = Math.max(10, (params.oxygen / 16) * 70);
-  } else if (params.oxygen > 35) {
-    oxygenSufficiency = Math.max(40, 100 - (params.oxygen - 35) * 2);
+  if (oxygenPartialPressureKPa < 16) {
+    oxygenSufficiency = Math.max(10, (oxygenPartialPressureKPa / 16) * 75);
+  } else if (oxygenPartialPressureKPa > 35) {
+    oxygenSufficiency = Math.max(40, 100 - (oxygenPartialPressureKPa - 35) * 2.5);
   }
 
+  const thermalComfort = Math.max(0, 100 - Math.abs(params.temperature - 20) * 2.2);
   const baseWellbeing =
-    (atmosphereScore * 0.3) +
-    (ecosystemScore * 0.25) +
-    (oxygenSufficiency * 0.3) +
-    (100 - params.airPollution) * 0.15 -
+    (atmosphereScore * 0.28) +
+    (oxygenSufficiency * 0.32) +
+    (thermalComfort * 0.2) +
+    (ecosystemScore * 0.2) -
     gravityStress;
 
-  wellbeingScore = clamp(baseWellbeing);
-  if (events.heatWave) wellbeingScore -= 12;
-  if (events.meteorShower) wellbeingScore -= 10;
+  const wellbeingScore = clamp(baseWellbeing);
 
-  // 5. Energy Stability: Dependent on energy source, disasters, city demand
+  // Demographics breakdown
+  const basePop = BASE_POPULATION_BY_SCENE[sceneId] || 1000000;
+  const popFactor = (params.population / 60);
+  const totalCount = Math.round(basePop * popFactor);
+
+  // Respiratory stress calculation based on AQI and oxygen
+  const respiratoryStressPercent = clamp((aqi / 500) * 70 + (oxygenSufficiency < 70 ? (70 - oxygenSufficiency) * 0.8 : 0));
+  const maskCompliancePercent = clamp(aqi > 100 ? (aqi - 80) * 0.9 : params.oxygen < 16 ? 90 : 15);
+  const healthyPercent = clamp(wellbeingScore * 0.9 - respiratoryStressPercent * 0.3);
+
+  let evacuationStatus: CitizenDemographics['evacuationStatus'] = 'normal';
+  if (events.meteorShower || aqi > 350 || params.oxygen < 12 || Math.abs(params.seaLevel) > 35) {
+    evacuationStatus = 'emergency';
+  } else if (events.heatWave || events.heavyRain || aqi > 200) {
+    evacuationStatus = 'mandatory';
+  } else if (aqi > 120 || events.drought) {
+    evacuationStatus = 'advisory';
+  }
+
+  const casualtyRatePerDay = evacuationStatus === 'emergency'
+    ? Math.round((totalCount * 0.0004))
+    : evacuationStatus === 'mandatory'
+    ? Math.round((totalCount * 0.00008))
+    : Math.round((totalCount * 0.00001));
+
+  // Generate contextual citizen thoughts
+  const activeThoughts: string[] = [];
+  if (aqiCategory === 'Hazardous' || aqiCategory === 'Very Unhealthy') {
+    activeThoughts.push('"The air tastes like metallic smoke. Industrial filters are burning out."');
+    activeThoughts.push('"P100 respirators mandatory outdoors. Keep children and elderly inside."');
+  } else if (aqiCategory === 'Good') {
+    activeThoughts.push('"Brisk, clean air today! Plazas and sky-gardens are full of people."');
+  }
+
+  if (oxygenPartialPressureKPa < 14) {
+    activeThoughts.push('"Atmospheric hypoxia alarm! Breathing is labored—supplemental O2 active."');
+  }
+
+  if (events.heatWave || params.temperature > 34) {
+    activeThoughts.push('"Surface heat is overwhelming. Street vapor cooling systems running 24/7."');
+  } else if (params.temperature < -10) {
+    activeThoughts.push('"Sub-zero freezing winds. Surface transit heated lanes deployed."');
+  }
+
+  if (events.heavyRain) {
+    activeThoughts.push('"Torrential rain and lightning strikes across the district! Umbrellas out."');
+  }
+
+  if (isMars) {
+    if (params.oxygen > 12) {
+      activeThoughts.push('"Historic moment: Dome airlocks opening for localized agricultural trials!"');
+    } else {
+      activeThoughts.push('"Martian atmosphere thin and toxic. Full pressurized EVA suits required."');
+    }
+  }
+
+  if (activeThoughts.length === 0) {
+    activeThoughts.push('"Civic systems stable. Life carrying on normally across districts."');
+  }
+
+  const demographics: CitizenDemographics = {
+    totalCount,
+    healthyPercent,
+    respiratoryStressPercent,
+    maskCompliancePercent,
+    evacuationStatus,
+    casualtyRatePerDay,
+    activeThoughts,
+  };
+
+  // 6. Energy Stability
   let energyScore = 80;
   if (params.energySource === 'renewable') {
     energyScore = 92;
-    if (events.drought) energyScore -= 5; // Hydro drops slightly
+    if (events.drought) energyScore -= 5;
   } else if (params.energySource === 'mixed') {
     energyScore = 78;
   } else {
-    // Fossil: High initial stability, but degraded by environmental backlash
     energyScore = 70 - params.airPollution * 0.15;
   }
-  if (events.solarFlare) energyScore -= 28; // Geomagnetic disruption
+  if (events.solarFlare) energyScore -= 28;
   if (events.meteorShower) energyScore -= 15;
   energyScore = clamp(energyScore);
 
-  // 6. Climate Balance: Aggregate balance
+  // 7. Climate Balance
   let climateScore = 0;
   if (isMars) {
     climateScore = clamp((atmosphereScore + waterScore + ecosystemScore) / 3);
@@ -365,12 +474,13 @@ export function calculateConditions(
     populationWellbeing: clamp(wellbeingScore),
     energyStability: clamp(energyScore),
     climateBalance: clamp(climateScore),
+    demographics,
+    physics,
   };
 }
 
 /**
- * Step the simulation forward by delta days.
- * Dynamically updates pollution and temperature feedbacks.
+ * Step simulation with dynamic feedback rates.
  */
 export function stepSimulation(
   currentParams: SimulationParameters,
@@ -380,32 +490,25 @@ export function stepSimulation(
   const p = { ...currentParams };
   const notifications: string[] = [];
 
-  // Feedback 1: Renewable energy gradually purifies air, Fossil adds smog
+  // Feedback 1: Renewable vs Fossil on air pollution
   if (p.energySource === 'renewable') {
     if (p.airPollution > 5) {
-      p.airPollution = Math.max(5, p.airPollution - 0.05 * deltaDays);
+      p.airPollution = Math.max(5, p.airPollution - 0.06 * deltaDays);
     }
   } else if (p.energySource === 'fossil') {
     if (p.airPollution < 95) {
-      p.airPollution = Math.min(95, p.airPollution + 0.08 * deltaDays);
+      p.airPollution = Math.min(95, p.airPollution + 0.09 * deltaDays);
     }
-    // Greenhouse warming trend
     if (p.temperature < 48) {
       p.temperature = Math.min(48, p.temperature + 0.015 * deltaDays);
     }
   }
 
-  // Feedback 2: Extreme temperature and sea level thermal expansion
+  // Feedback 2: Thermal expansion
   if (p.temperature > 30) {
     p.seaLevel = Math.min(45, p.seaLevel + 0.02 * deltaDays);
   } else if (p.temperature < -5 && p.seaLevel > -30) {
-    // Glaciation lockup
     p.seaLevel = Math.max(-30, p.seaLevel - 0.015 * deltaDays);
-  }
-
-  // Feedback 3: Low oxygen alert check
-  if (p.oxygen < 14) {
-    // Very low oxygen
   }
 
   return {
@@ -415,7 +518,7 @@ export function stepSimulation(
 }
 
 /**
- * Generate context-aware observational insights for the player.
+ * Contextual explanatory observations.
  */
 export function generateExplanations(
   params: SimulationParameters,
@@ -426,19 +529,38 @@ export function generateExplanations(
   const logs: SimulationLog[] = [];
   const makeId = (msg: string) => msg.slice(0, 24).replace(/\s+/g, '-').toLowerCase();
 
-  if (params.oxygen < 15) {
+  const pO2 = conditions.physics.oxygenPartialPressureKPa;
+  if (pO2 < 15) {
     logs.push({
-      id: makeId('oxygen-low'),
+      id: makeId('oxygen-hypoxia'),
       timestamp: Date.now(),
       type: 'alert',
-      message: 'Critical: Oxygen has dropped below 15%. Atmospheric haze detected, ecosystem vitality slowing.',
+      message: `Critical Hypoxia: O2 partial pressure has dropped to ${pO2} kPa (normal: 21.2 kPa). Citizens suffering respiratory distress; automated oxygen dispensers triggered.`,
     });
-  } else if (params.oxygen > 30) {
+  } else if (pO2 > 30) {
     logs.push({
-      id: makeId('oxygen-high'),
+      id: makeId('oxygen-hyperoxia'),
       timestamp: Date.now(),
       type: 'warning',
-      message: 'High oxygen saturation detected: atmospheric reactivity is elevated.',
+      message: `Hyperoxic Atmosphere: pO2 at ${pO2} kPa. Flammability risk is extremely elevated.`,
+    });
+  }
+
+  if (conditions.physics.aqiCategory === 'Hazardous') {
+    logs.push({
+      id: makeId('aqi-hazardous'),
+      timestamp: Date.now(),
+      type: 'alert',
+      message: `Hazardous Air Quality (AQI ${conditions.physics.airQualityIndex}): Toxic particulate smog has overwhelmed civic air filtration. ${conditions.demographics.maskCompliancePercent}% of citizens wearing respirators.`,
+    });
+  }
+
+  if (params.seaLevel > 15) {
+    logs.push({
+      id: makeId('sealevel-high'),
+      timestamp: Date.now(),
+      type: 'warning',
+      message: 'Rising sea level is putting coastal zones, harbors, and low-lying habitats under pressure.',
     });
   }
 
@@ -448,7 +570,7 @@ export function generateExplanations(
       id: makeId('density-low'),
       timestamp: Date.now(),
       type: 'alert',
-      message: 'Thin atmosphere detected: low barometric pressure is reducing heat retention and increasing cosmic radiation.',
+      message: 'Thin atmosphere detected: barometric pressure is dangerously thin, accelerating hypoxia and solar radiation exposure.',
     });
   } else if (densityVal > 150) {
     logs.push({
@@ -476,37 +598,12 @@ export function generateExplanations(
     });
   }
 
-  if (params.temperature > 35) {
+  if (events.heavyRain) {
     logs.push({
-      id: makeId('temp-extreme-high'),
-      timestamp: Date.now(),
-      type: 'alert',
-      message: 'Intense thermal conditions are accelerating surface evaporation and iceberg melting.',
-    });
-  } else if (params.temperature < -15 && sceneId !== 'mars-colony') {
-    logs.push({
-      id: makeId('temp-extreme-low'),
+      id: makeId('heavy-rain'),
       timestamp: Date.now(),
       type: 'warning',
-      message: 'Freezing temperatures are expanding polar ice shelves and reducing liquid water availability.',
-    });
-  }
-
-  if (params.seaLevel > 15) {
-    logs.push({
-      id: makeId('sealevel-high'),
-      timestamp: Date.now(),
-      type: 'warning',
-      message: 'Rising sea level is putting coastal zones and low-lying habitats under pressure.',
-    });
-  }
-
-  if (params.airPollution > 60) {
-    logs.push({
-      id: makeId('pollution-high'),
-      timestamp: Date.now(),
-      type: 'alert',
-      message: 'High particulate pollution is reducing solar clarity and impacting population wellbeing.',
+      message: 'Severe Stormfront: Heavy rain, lightning flashes, and localized waterlogging detected across districts.',
     });
   }
 
@@ -515,44 +612,25 @@ export function generateExplanations(
       id: makeId('solar-flare'),
       timestamp: Date.now(),
       type: 'alert',
-      message: 'Solar flare in progress: geomagnetic flux is disrupting energy stability and ionosphere.',
+      message: 'Solar Flare Storm: High-energy magnetic radiation causing grid brownouts and ionospheric auroras.',
     });
   }
 
-  if (events.drought && params.rainfall < 30) {
-    logs.push({
-      id: makeId('severe-drought'),
-      timestamp: Date.now(),
-      type: 'alert',
-      message: 'Severe drought conditions: soil moisture depleted and vegetation growth suppressed.',
-    });
-  }
-
-  if (params.energySource === 'renewable' && params.airPollution < 15) {
+  if (params.energySource === 'renewable' && conditions.physics.airQualityIndex < 40) {
     logs.push({
       id: makeId('clean-grid'),
       timestamp: Date.now(),
       type: 'success',
-      message: 'Clean renewable grid is maintaining optimal air quality and stable climate cycles.',
+      message: `Zero-Emission Equilibrium: Clean renewable grid has lowered AQI to ${conditions.physics.airQualityIndex}. Population health at peak vitality.`,
     });
   }
 
-  if (sceneId === 'mars-colony' && params.oxygen > 12) {
-    logs.push({
-      id: makeId('mars-terraforming'),
-      timestamp: Date.now(),
-      type: 'success',
-      message: 'Mars terraforming benchmark: synthetic atmosphere is supporting localized biodome expansion.',
-    });
-  }
-
-  // Fallback equilibrium log
   if (logs.length === 0) {
     logs.push({
       id: 'steady-state',
       timestamp: Date.now(),
       type: 'info',
-      message: 'Planetary systems are operating in stable equilibrium. Adjust parameters to test chain reactions.',
+      message: `District Equilibrium: ${conditions.demographics.totalCount.toLocaleString()} citizens operating under stable climate conditions.`,
     });
   }
 
@@ -560,7 +638,7 @@ export function generateExplanations(
 }
 
 /**
- * Check and unlock achievements.
+ * Check achievements.
  */
 export function checkAchievements(
   currentList: Achievement[],
@@ -577,12 +655,12 @@ export function checkAchievements(
 
     let unlock = false;
     if (ach.id === 'balanced-planet') {
-      unlock = Object.values(conditions).every((val) => val >= 75);
+      unlock = conditions.atmosphere >= 75 && conditions.ecosystemHealth >= 75 && conditions.populationWellbeing >= 75;
     } else if (ach.id === 'green-city') {
       unlock = sceneId === 'future-city' && params.energySource === 'renewable' && params.airPollution < 10;
     } else if (ach.id === 'ocean-guardian') {
       unlock = sceneId === 'ocean-world' && conditions.ecosystemHealth >= 80 && Math.abs(params.seaLevel) <= 5;
-    } else if (ach.id === 'mars-pioneer' || ach.id === 'mars-survivor') {
+    } else if (ach.id === 'mars-survivor') {
       unlock = sceneId === 'mars-colony' && conditions.energyStability >= 70 && conditions.populationWellbeing >= 60;
     } else if (ach.id === 'curious-scientist') {
       unlock = activeEventCount >= 3 || params.temperature > 50 || params.oxygen < 8;

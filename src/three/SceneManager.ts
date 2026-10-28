@@ -14,6 +14,7 @@ import { FutureCityScene } from './scenes/FutureCityScene';
 import { OceanWorldScene } from './scenes/OceanWorldScene';
 import { MarsColonyScene } from './scenes/MarsColonyScene';
 import { WeatherParticles } from './effects/WeatherParticles';
+import { CrowdManager } from './people/CrowdManager';
 
 export class SceneManager {
   private container: HTMLElement;
@@ -25,6 +26,7 @@ export class SceneManager {
   private activeWorldScene: IWorldScene | null = null;
   private currentSceneId: WorldSceneId = 'mini-earth';
   private weatherParticles!: WeatherParticles;
+  private crowdManager!: CrowdManager;
 
   private keyLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
@@ -90,7 +92,7 @@ export class SceneManager {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = !this.isSoftwareGl;
     this.controls.dampingFactor = 0.05;
-    this.controls.maxDistance = 65;
+    this.controls.maxDistance = 140;
     this.controls.minDistance = 8;
     this.controls.maxPolarAngle = Math.PI / 2 + 0.05;
 
@@ -110,13 +112,17 @@ export class SceneManager {
     this.weatherParticles = new WeatherParticles();
     this.scene.add(this.weatherParticles.group);
 
-    // 8. Event listeners
+    // 8. Human Demographics and Visible Citizens
+    this.crowdManager = new CrowdManager();
+    this.scene.add(this.crowdManager.group);
+
+    // 9. Event listeners
     window.addEventListener('resize', this.onResize);
 
-    // 9. Load initial scene
+    // 10. Load initial scene
     this.loadScene('mini-earth');
 
-    // 10. Start Animation Loop
+    // 11. Start Animation Loop
     this.lastTime = performance.now();
     this.tick();
   }
@@ -149,10 +155,10 @@ export class SceneManager {
 
       case 'future-city':
         this.activeWorldScene = new FutureCityScene();
-        this.scene.background = new THREE.Color(0x050b14);
-        this.scene.fog = new THREE.FogExp2(0x050b14, 0.016);
-        this.camera.position.set(16, 20, 32);
-        this.controls.target.set(0, 8, 0);
+        this.scene.background = new THREE.Color(0x0c1628);
+        this.scene.fog = new THREE.FogExp2(0x0c1628, 0.005);
+        this.camera.position.set(0, 50, 70);
+        this.controls.target.set(0, 10, 0);
         break;
 
       case 'ocean-world':
@@ -175,6 +181,7 @@ export class SceneManager {
     if (this.activeWorldScene) {
       this.activeWorldScene.init(this.scene);
     }
+    this.crowdManager.configureForScene(sceneId);
     this.controls.update();
   }
 
@@ -203,12 +210,12 @@ export class SceneManager {
       } else if (events.heatWave) {
         this.scene.background = new THREE.Color(0x271e16);
       } else {
-        const baseColor = this.currentSceneId === 'ocean-world' ? 0x031d38 : 0x081326;
+        const baseColor = this.currentSceneId === 'ocean-world' ? 0x031d38 : this.currentSceneId === 'future-city' ? 0x0c1628 : 0x081326;
         this.scene.background = new THREE.Color(baseColor);
       }
       if (this.scene.fog instanceof THREE.FogExp2) {
         this.scene.fog.color.copy(this.scene.background);
-        const baseDensity = this.currentSceneId === 'forest-valley' ? 0.018 : this.currentSceneId === 'future-city' ? 0.016 : 0.022;
+        const baseDensity = this.currentSceneId === 'forest-valley' ? 0.018 : this.currentSceneId === 'future-city' ? 0.006 : 0.022;
         this.scene.fog.density = baseDensity * densityFactor;
       }
     } else {
@@ -264,7 +271,18 @@ export class SceneManager {
     const isForest = this.currentSceneId === 'forest-valley';
     const rotSpeed = params.rotationSpeed ?? 1.0;
     const densityFactor = (params.atmosphereDensity ?? 100) / 100;
-    this.weatherParticles.update(dt, params.rainfall, events, isMars, isForest, rotSpeed, densityFactor);
+    this.weatherParticles.update(
+      dt,
+      params.rainfall,
+      params.temperature,
+      events,
+      conditions.physics,
+      isMars,
+      isForest,
+      rotSpeed,
+      densityFactor
+    );
+    this.crowdManager.update(dt, params, events, conditions, this.currentSceneId);
   }
 
   private afterDraw(cb: () => void) {
@@ -298,6 +316,7 @@ export class SceneManager {
       this.activeWorldScene.dispose();
       this.activeWorldScene = null;
     }
+    this.crowdManager.dispose();
     this.weatherParticles.dispose();
     this.controls.dispose();
     this.renderer.dispose();

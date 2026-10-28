@@ -30,6 +30,25 @@ export interface DisasterEvents {
   solarFlare: boolean;
 }
 
+export interface CitizenDemographics {
+  totalCount: number; // e.g. 2,400,000
+  healthyPercent: number; // 0 - 100
+  respiratoryStressPercent: number; // 0 - 100
+  maskCompliancePercent: number; // 0 - 100
+  evacuationStatus: 'normal' | 'advisory' | 'mandatory' | 'emergency';
+  casualtyRatePerDay: number; // count per simulated day
+  activeThoughts: string[]; // live citizen thoughts/reactions
+}
+
+export interface AtmospherePhysics {
+  oxygenPartialPressureKPa: number; // normal ~21.2 kPa
+  airQualityIndex: number; // 0 - 500 AQI
+  aqiCategory: 'Good' | 'Moderate' | 'Unhealthy' | 'Very Unhealthy' | 'Hazardous';
+  fogDensityPercent: number; // 0 - 100%
+  surfaceWetness: number; // 0.0 to 1.0
+  lightningActive: boolean;
+}
+
 export interface ConditionScores {
   atmosphere: number; // 0 - 100
   ecosystemHealth: number; // 0 - 100
@@ -37,6 +56,8 @@ export interface ConditionScores {
   populationWellbeing: number; // 0 - 100
   energyStability: number; // 0 - 100
   climateBalance: number; // 0 - 100
+  demographics: CitizenDemographics;
+  physics: AtmospherePhysics;
 }
 
 export interface SimulationLog {
@@ -53,6 +74,8 @@ export interface TimelinePoint {
   temperature: number;
   climateBalance: number;
   wellbeing: number;
+  aqi: number;
+  healthyPopulation: number;
 }
 
 export interface Achievement {

@@ -195,7 +195,11 @@ export class ForestValleyScene implements IWorldScene {
     });
     this.terrainMat.color.setHex(groundColor);
 
-    // 3. Atmosphere Density & Rainfall on river water
+    // 3. Atmosphere Density & Rainfall on river water & ground wetness
+    const wetness = conditions.physics.surfaceWetness;
+    this.terrainMat.roughness = THREE.MathUtils.lerp(0.85, 0.38, wetness);
+    this.terrainMat.metalness = THREE.MathUtils.lerp(0.05, 0.4, wetness);
+
     let waterHeight = -0.6;
     let waterScaleX = 1.0;
     if (events.drought) {
